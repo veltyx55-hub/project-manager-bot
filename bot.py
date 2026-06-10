@@ -39,8 +39,9 @@ DEADLINE_HOURS = {"normal": 48, "urgent": 3}
 MAX_ACTIVE     = 2
 TL_ROLES       = ["KTL", "ETL"]
 
-ADMIN_ROLE_ID = 1436698468470231080  # Role to ping for TS auction alerts (0 = disabled)
-ADMIN_ID      = 0                    # User ID to ping when TS chapter done & ready to upload (0 = disabled)
+ADMIN_ROLE_ID = 1424282282142732348  # Role to ping for TS auction alerts (0 = disabled)
+UPLOADER_ID      = 1436698468470231080
+# Role ID to ping when TS chapter done & ready to upload (0 = disabled)
 
 # (hours_remaining, stage_number, label) — checked every 5 min
 REMINDER_STAGES = [
@@ -524,13 +525,14 @@ async def execute_mark_done(interaction: discord.Interaction, role: str, chapter
 
     await refresh_auction_message(interaction.client, row["auction_id"])
 
-    # TS COMPLETION — notify admin that chapter is ready to upload
-    if role == "TS":
-        admin_ping = f"<@{ADMIN_ID}> " if ADMIN_ID else ""
-        await interaction.channel.send(
-            f"📢 **TS #{chapter}** sudah selesai & siap upload!\n"
-            f"{admin_ping}silakan upload~"
-        )
+    # TS COMPLETION — notify uploader role that chapter is ready to upload
+if role == "TS":
+    upload_ping = f"<@&{UPLOAD_ID}> " if UPLOAD_ID else ""
+
+    await interaction.channel.send(
+        f"📢 **TS #{chapter}** sudah selesai & siap upload!\n"
+        f"{upload_ping}silakan upload~"
+    )
 
     # AUTO TS CHECK — fires only when ALL TL roles for this chapter are done
     if role in TL_ROLES:
