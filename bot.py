@@ -32,7 +32,7 @@ PAYRATES = {
 
 URGENT_BONUS = {
     "TL": 2000,   # applies to KTL + ETL
-    "TS": 5000,   # applies to TS
+    "TS": 2000,   # applies to TS
 }
 
 DEADLINE_HOURS = {"normal": 48, "urgent": 3}
@@ -187,7 +187,7 @@ async def build_embed(pool: asyncpg.Pool, auction_id: int) -> discord.Embed:
     async with pool.acquire() as conn:
         auction = await conn.fetchrow("SELECT * FROM auctions WHERE id=$1", auction_id)
         rows    = await conn.fetch(
-            "SELECT * FROM chapter_assignments WHERE auction_id=$1 ORDER BY chapter",
+            "SELECT * FROM chapter_assignments WHERE auction_id=$1 ORDER BY LPAD(chapter, 10, '0')",
             auction_id
         )
 
@@ -328,7 +328,7 @@ class ClaimButton(discord.ui.Button):
             ch = await conn.fetchrow("""
                 SELECT * FROM chapter_assignments
                 WHERE auction_id=$1 AND role=$2 AND status='available'
-                ORDER BY chapter LIMIT 1
+                ORDER BY LPAD(chapter, 10, '0') LIMIT 1
             """, auction["id"], self.role)
 
         if not ch:
@@ -456,42 +456,9 @@ async def auction_cmd(
     await interaction.followup.send("✅ Auction berhasil dibuat!", ephemeral=True)
 
 
-# ================= AUTO TS =================
-async def auto_create_ts_auction(client: ScanBot, auction_id: int, guild_id: str,
-                                  project_channel_id: str, chapter: str):
-    async with client.pool.acquire() as conn:
-        existing = await conn.fetchrow("""
-            SELECT 1 FROM chapter_assignments
-            WHERE auction_id=$1 AND chapter=$2 AND role='TS'
-        """, auction_id, chapter)
-
-        if existing:
-            return
-
-        await conn.execute("""
-            INSERT INTO chapter_assignments (auction_id, chapter, role, status)
-            VALUES ($1, $2, 'TS', 'available')
-        """, auction_id, chapter)
-
-    guild = client.get_guild(int(guild_id))
-    if not guild:
-        return
-
-    channel = guild.get_channel(int(project_channel_id))
-    if channel:
-        admin_ping = f"<@&{ADMIN_ROLE_ID}> " if ADMIN_ROLE_ID else ""
-        await channel.send(
-            f"{admin_ping}🚨 **AUTO AUCTION TS CREATED**\n"
-            f"📌 Ch {chapter} belum dilelang untuk TS\n"
-            f"👉 Silakan claim di channel lelang!"
-        )
-
-    await refresh_auction_message(client, auction_id)
-
-
 # ================= EXECUTE MARK DONE (called after dropdown selection) =================
 async def execute_mark_done(interaction: discord.Interaction, role: str, chapter: str, row):
-    """Run DB update + TS check after user confirms via dropdown.
+    """Run DB update + TL notification after user confirms via dropdown.
     The initial interaction is already responded to (dropdown was shown),
     so we use followup / channel.send for all further messages."""
     pool    = interaction.client.pool
@@ -533,34 +500,40 @@ async def execute_mark_done(interaction: discord.Interaction, role: str, chapter
             f"{upload_ping}silakan upload~"
         )
 
-    # AUTO TS CHECK — fires only when ALL TL roles for this chapter are done
+    # TL DONE — notify admin when all TL roles for a chapter are done (notification only, no auto TS)
     if role in TL_ROLES:
         async with pool.acquire() as conn:
-            tl_rows = await conn.fetch("""
+            tl_chapter_rows = await conn.fetch("""
                 SELECT role, status FROM chapter_assignments
                 WHERE auction_id=$1 AND chapter=$2 AND role=ANY($3::text[])
             """, row["auction_id"], chapter, TL_ROLES)
 
-            ts_row = await conn.fetchrow("""
-                SELECT assignee_id, status FROM chapter_assignments
-                WHERE auction_id=$1 AND chapter=$2 AND role='TS'
-            """, row["auction_id"], chapter)
+        all_chapter_tl_done = bool(tl_chapter_rows) and all(r["status"] == "done" for r in tl_chapter_rows)
 
-        all_tl_done = bool(tl_rows) and all(r["status"] == "done" for r in tl_rows)
+        if all_chapter_tl_done:
+            admin_ping = f"<@&{ADMIN_ROLE_ID}>" if ADMIN_ROLE_ID else ""
+            await interaction.channel.send(
+    f"{admin_ping}\n"
+    f"📢 TL Chapter **#{chapter}** sudah selesai.\n"
+    f"<#{row['project_channel_id']}>"
+            )
 
-        if all_tl_done:
-            if not ts_row or ts_row["status"] not in ("claimed", "done"):
-                await auto_create_ts_auction(
-                    interaction.client,
-                    row["auction_id"],
-                    row["guild_id"],
-                    row["project_channel_id"],
-                    chapter
-                )
-            elif ts_row["status"] == "claimed":
-                await interaction.channel.send(
-                    f"📢 TS sudah ada untuk #{chapter} → <@{ts_row['assignee_id']}>"
-                )
+            # Check if ALL TL in the entire auction/project are done
+            async with pool.acquire() as conn:
+                all_tl_auction = await conn.fetch("""
+                    SELECT status FROM chapter_assignments
+                    WHERE auction_id=$1 AND role=ANY($2::text[])
+                """, row["auction_id"], TL_ROLES)
+
+            all_project_tl_done = bool(all_tl_auction) and all(r["status"] == "done" for r in all_tl_auction)
+
+            if all_project_tl_done:
+    await interaction.channel.send(
+        f"{admin_ping}\n"
+        f"📢 Semua TL pada project ini sudah selesai.\n"
+        f"<#{row['project_channel_id']}>\n"
+        f"Silakan mulai proses lelang TS jika diperlukan."
+    )
 
 
 # ================= CHAPTER SELECT UI =================
@@ -575,31 +548,33 @@ class ChapterSelect(discord.ui.Select):
             for r in rows
         ]
         super().__init__(
-            placeholder=f"Pilih chapter {role} yang selesai…",
+            placeholder=f"Pilih chapter {role} yang selesai (bisa lebih dari 1)…",
             min_values=1,
-            max_values=1,
+            max_values=len(options),
             options=options,
         )
         self.role = role
         self.rows_map = {r["chapter"]: r for r in rows}
 
     async def callback(self, interaction: discord.Interaction):
-        chapter = self.values[0]
-        row     = self.rows_map.get(chapter)
+        selected = self.values  # list of selected chapters
 
         # Disable dropdown so it can't be clicked twice
         self.disabled = True
+        chapter_list = ", ".join(f"#{c}" for c in selected)
         await interaction.response.edit_message(
-            content=f"⏳ Memproses **{self.role} #{chapter}**…",
+            content=f"⏳ Memproses **{self.role}** chapter: {chapter_list}…",
             view=self.view
         )
 
-        if not row:
-            return await interaction.followup.send(
-                "❌ Chapter tidak ditemukan, coba lagi.", ephemeral=True
-            )
-
-        await execute_mark_done(interaction, self.role, chapter, row)
+        for chapter in selected:
+            row = self.rows_map.get(chapter)
+            if not row:
+                await interaction.followup.send(
+                    f"❌ Chapter #{chapter} tidak ditemukan, coba lagi.", ephemeral=True
+                )
+                continue
+            await execute_mark_done(interaction, self.role, chapter, row)
 
 
 class ChapterSelectView(discord.ui.View):
@@ -631,7 +606,7 @@ async def show_chapter_picker(interaction: discord.Interaction, role: str):
               AND ca.assignee_id=$2
               AND ca.role=$3
               AND ca.status='claimed'
-            ORDER BY ca.chapter
+            ORDER BY LPAD(ca.chapter, 10, '0')
         """, channel_id, user_id, role)
 
     if not active_rows:
