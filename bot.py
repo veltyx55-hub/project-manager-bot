@@ -202,7 +202,11 @@ async def build_embed(pool: asyncpg.Pool, auction_id: int) -> discord.Embed:
         color=discord.Color.red() if urgent else discord.Color.blue()
     )
     embed.add_field(name="Mode", value=mode, inline=True)
-
+embed.add_field(
+    name="📌 Project",
+    value=f"#{auction['project_name'].replace(' ', '-').lower()}",
+    inline=True
+)
     # Payrates field
     roles_present = [r for r in ["KTL", "ETL", "TS"] if any(x["role"] == r for x in rows)]
     if roles_present:
