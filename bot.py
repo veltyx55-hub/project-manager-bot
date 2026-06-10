@@ -525,13 +525,13 @@ async def execute_mark_done(interaction: discord.Interaction, role: str, chapter
     await refresh_auction_message(interaction.client, row["auction_id"])
 
     # TS COMPLETION — notify uploader role that chapter is ready to upload
-if role == "TS":
-    upload_ping = f"<@&{UPLOADER_ROLE_ID}> " if UPLOADER_ROLE_ID else ""
+    if role == "TS":
+        upload_ping = f"<@&{UPLOADER_ROLE_ID}> " if UPLOADER_ROLE_ID else ""
 
-    await interaction.channel.send(
-        f"📢 **TS #{chapter}** sudah selesai & siap upload!\n"
-        f"{upload_ping}silakan upload~"
-    )
+        await interaction.channel.send(
+            f"📢 **TS #{chapter}** sudah selesai & siap upload!\n"
+            f"{upload_ping}silakan upload~"
+        )
 
     # AUTO TS CHECK — fires only when ALL TL roles for this chapter are done
     if role in TL_ROLES:
