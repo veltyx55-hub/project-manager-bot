@@ -24,7 +24,6 @@ ROLE_IDS = {
     "TS":  1424324905108770899,
 }
 
-STAFF_ROLE_ID = 11436694074093604904  # kept as-is per your config
 
 PAYRATES = {
     "KTL": 5000,
