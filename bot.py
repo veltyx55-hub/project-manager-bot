@@ -75,7 +75,7 @@ class ScanBot(discord.Client):
         self.pool = await asyncpg.create_pool(DATABASE_URL)
         await init_db(self.pool)
         self.add_view(AuctionView(self))
-        await self.tree.sync()
+        await self.tree.sync(guild=discord.Object(id=GUILD_ID))
         print("✅ Bot ready")
         deadline_check.start()
 
@@ -513,9 +513,10 @@ async def execute_mark_done(interaction: discord.Interaction, role: str, chapter
         if all_chapter_tl_done:
             admin_ping = f"<@&{ADMIN_ROLE_ID}>" if ADMIN_ROLE_ID else ""
             await interaction.channel.send(
-    f"{admin_ping}\n"
-    f"📢 TL Chapter **#{chapter}** sudah selesai.\n"
-    f"<#{row['project_channel_id']}>"
+                f"{admin_ping}\n"
+                f"📢 TL Chapter **#{chapter}** sudah selesai.\n"
+                f"<#{row['project_channel_id']}>\n"
+                f"Silakan buat lelang TS jika diperlukan."
             )
 
             # Check if ALL TL in the entire auction/project are done
@@ -528,12 +529,11 @@ async def execute_mark_done(interaction: discord.Interaction, role: str, chapter
             all_project_tl_done = bool(all_tl_auction) and all(r["status"] == "done" for r in all_tl_auction)
 
             if all_project_tl_done:
-    await interaction.channel.send(
-        f"{admin_ping}\n"
-        f"📢 Semua TL pada project ini sudah selesai.\n"
-        f"<#{row['project_channel_id']}>\n"
-        f"Silakan mulai proses lelang TS jika diperlukan."
-    )
+                await interaction.channel.send(
+                    f"{admin_ping}\n"
+                    f"📢 Semua TL pada project ini sudah selesai.\n"
+                    f"<#{row['project_channel_id']}>"
+                )
 
 
 # ================= CHAPTER SELECT UI =================
@@ -714,6 +714,138 @@ async def deadline_check():
                     "UPDATE chapter_assignments SET reminder_stage=$1 WHERE id=$2",
                     best_stage, r["id"]
                 )
+
+
+# ================= /unclaim =================
+class UnclaimReasonModal(discord.ui.Modal, title="Alasan Unclaim"):
+    reason = discord.ui.TextInput(
+        label="Alasan unclaim",
+        placeholder="Contoh: Tidak bisa menyelesaikan, ada keperluan mendadak...",
+        required=True,
+        max_length=200,
+        style=discord.TextStyle.paragraph,
+    )
+
+    def __init__(self, row):
+        super().__init__()
+        self.row = row
+
+    async def on_submit(self, interaction: discord.Interaction):
+        pool    = interaction.client.pool
+        row     = self.row
+        user_id = str(interaction.user.id)
+
+        # Safety: ensure chapter still belongs to this user
+        if row["assignee_id"] != user_id:
+            return await interaction.response.send_message(
+                "❌ Chapter ini bukan milikmu.", ephemeral=True
+            )
+
+        async with pool.acquire() as conn:
+            updated = await conn.fetchval("""
+                UPDATE chapter_assignments
+                SET status='available', assignee_id=NULL, assignee_name=NULL,
+                    claimed_at=NULL, deadline_at=NULL
+                WHERE id=$1 AND status='claimed' AND assignee_id=$2
+                RETURNING id
+            """, row["id"], user_id)
+
+        if not updated:
+            return await interaction.response.send_message(
+                "❌ Gagal unclaim. Chapter sudah tidak di-claim atau bukan milikmu.",
+                ephemeral=True,
+            )
+
+        await interaction.response.send_message(
+            f"✅ Berhasil unclaim **{row['role']} #{row['chapter']}**",
+            ephemeral=True,
+        )
+
+        await refresh_auction_message(interaction.client, row["auction_id"])
+
+        project_ch = interaction.guild.get_channel(int(row["project_channel_id"]))
+        if project_ch:
+            admin_ping = f"<@&{ADMIN_ROLE_ID}>\n" if ADMIN_ROLE_ID else ""
+            await project_ch.send(
+                f"{admin_ping}"
+                f"⚠️ **Chapter dilepas (UNCLAIM)**\n"
+                f"📌 **{row['role']} #{row['chapter']}**\n"
+                f"👤 {interaction.user.mention}\n"
+                f"📝 Alasan: {self.reason.value}"
+            )
+
+
+class UnclaimSelect(discord.ui.Select):
+    def __init__(self, rows: list):
+        options = [
+            discord.SelectOption(
+                label=f"{r['role']} #{r['chapter']}",
+                value=str(r["id"]),
+                description="sedang di-claim oleh kamu",
+            )
+            for r in rows
+        ]
+        super().__init__(
+            placeholder="Pilih chapter yang ingin di-unclaim…",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+        self.rows_map = {str(r["id"]): r for r in rows}
+
+    async def callback(self, interaction: discord.Interaction):
+        selected_id = self.values[0]
+        row = self.rows_map.get(selected_id)
+        if not row:
+            return await interaction.response.send_message(
+                "❌ Chapter tidak ditemukan, coba lagi.", ephemeral=True
+            )
+        await interaction.response.send_modal(UnclaimReasonModal(row))
+
+
+class UnclaimSelectView(discord.ui.View):
+    def __init__(self, rows: list):
+        super().__init__(timeout=60)
+        self.add_item(UnclaimSelect(rows))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+@bot.tree.command(name="unclaim", description="Lepaskan chapter yang sedang kamu kerjakan")
+async def unclaim_cmd(interaction: discord.Interaction):
+    if not await home_guild_check(interaction):
+        return
+
+    pool       = interaction.client.pool
+    user_id    = str(interaction.user.id)
+    channel_id = str(interaction.channel_id)
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT ca.id, ca.chapter, ca.role, ca.assignee_id, ca.auction_id,
+                   a.project_channel_id, a.guild_id
+            FROM chapter_assignments ca
+            JOIN auctions a ON a.id = ca.auction_id
+            WHERE a.project_channel_id=$1
+              AND ca.assignee_id=$2
+              AND ca.status='claimed'
+            ORDER BY LPAD(ca.chapter, 10, '0')
+        """, channel_id, user_id)
+
+    if not rows:
+        return await interaction.response.send_message(
+            "❌ Kamu tidak punya chapter yang sedang di-claim di channel ini.",
+            ephemeral=True,
+        )
+
+    chapter_list = "  ".join(f"`{r['role']} #{r['chapter']}`" for r in rows)
+    await interaction.response.send_message(
+        f"📋 Pilih chapter yang ingin di-unclaim:\n{chapter_list}",
+        view=UnclaimSelectView(rows),
+        ephemeral=True,
+    )
 
 
 bot.run(TOKEN)
