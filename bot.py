@@ -458,7 +458,7 @@ async def auction_cmd(
 
 # ================= EXECUTE MARK DONE (called after dropdown selection) =================
 async def execute_mark_done(interaction: discord.Interaction, role: str, chapter: str, row):
-    """Run DB update + TL notification after user confirms via dropdown.
+    """Run DB update + notifications after user confirms via dropdown.
     The initial interaction is already responded to (dropdown was shown),
     so we use followup / channel.send for all further messages."""
     pool    = interaction.client.pool
@@ -491,49 +491,47 @@ async def execute_mark_done(interaction: discord.Interaction, role: str, chapter
 
     await refresh_auction_message(interaction.client, row["auction_id"])
 
-    # TS COMPLETION — notify uploader role that chapter is ready to upload
-    if role == "TS":
-        upload_ping = f"<@&{UPLOADER_ROLE_ID}> " if UPLOADER_ROLE_ID else ""
+    admin_ping    = f"<@&{ADMIN_ROLE_ID}>\n"    if ADMIN_ROLE_ID    else ""
+    uploader_ping = f"<@&{UPLOADER_ROLE_ID}>\n" if UPLOADER_ROLE_ID else ""
 
+    # ── TS LOGIC ──────────────────────────────────────────────────────────
+    if role == "TS":
+        # 1. Per-chapter: ping uploader
         await interaction.channel.send(
-            f"📢 **TS #{chapter}** sudah selesai & siap upload!\n"
-            f"{upload_ping}silakan upload~"
+            f"{uploader_ping}"
+            f"📢 TS **#{chapter}** sudah selesai!\n"
+            f"Silakan upload."
         )
 
-    # TL DONE — notify admin when all TL roles for a chapter are done (notification only, no auto TS)
-    if role in TL_ROLES:
+        # 2. Final: if ALL TS in this auction are done → ping admin once
         async with pool.acquire() as conn:
-            tl_chapter_rows = await conn.fetch("""
-                SELECT role, status FROM chapter_assignments
-                WHERE auction_id=$1 AND chapter=$2 AND role=ANY($3::text[])
-            """, row["auction_id"], chapter, TL_ROLES)
+            all_ts = await conn.fetch("""
+                SELECT status FROM chapter_assignments
+                WHERE auction_id=$1 AND role='TS'
+            """, row["auction_id"])
 
-        all_chapter_tl_done = bool(tl_chapter_rows) and all(r["status"] == "done" for r in tl_chapter_rows)
-
-        if all_chapter_tl_done:
-            admin_ping = f"<@&{ADMIN_ROLE_ID}>" if ADMIN_ROLE_ID else ""
+        if all_ts and all(r["status"] == "done" for r in all_ts):
             await interaction.channel.send(
-                f"{admin_ping}\n"
-                f"📢 TL Chapter **#{chapter}** sudah selesai.\n"
-                f"<#{row['project_channel_id']}>\n"
-                f"Silakan buat lelang TS jika diperlukan."
+                f"{admin_ping}"
+                f"📢 Project ini sudah selesai di TS~\n"
+                f"Tidak ada TS yang tersisa lagi."
             )
 
-            # Check if ALL TL in the entire auction/project are done
-            async with pool.acquire() as conn:
-                all_tl_auction = await conn.fetch("""
-                    SELECT status FROM chapter_assignments
-                    WHERE auction_id=$1 AND role=ANY($2::text[])
-                """, row["auction_id"], TL_ROLES)
+    # ── TL LOGIC ──────────────────────────────────────────────────────────
+    if role in TL_ROLES:
+        # Only 1 notif: when ALL TL in the entire auction are done → ping admin once
+        async with pool.acquire() as conn:
+            all_tl = await conn.fetch("""
+                SELECT status FROM chapter_assignments
+                WHERE auction_id=$1 AND role=ANY($2::text[])
+            """, row["auction_id"], TL_ROLES)
 
-            all_project_tl_done = bool(all_tl_auction) and all(r["status"] == "done" for r in all_tl_auction)
-
-            if all_project_tl_done:
-                await interaction.channel.send(
-                    f"{admin_ping}\n"
-                    f"📢 Semua TL pada project ini sudah selesai.\n"
-                    f"<#{row['project_channel_id']}>"
-                )
+        if all_tl and all(r["status"] == "done" for r in all_tl):
+            await interaction.channel.send(
+                f"{admin_ping}"
+                f"📢 SEMUA TL SELESAI!\n"
+                f"👉 Silakan lanjutkan membuat Lelang TS."
+            )
 
 
 # ================= CHAPTER SELECT UI =================
