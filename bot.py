@@ -656,45 +656,46 @@ async def deadline_check():
         """)
 
     for r in rows:
-        guild = bot.get_guild(int(r["guild_id"]))
-        if not guild:
-            continue
+    for r in rows:
+    guild = bot.get_guild(int(r["guild_id"]))
+    if not guild:
+        continue
 
-        project_ch  = guild.get_channel(int(r["project_channel_id"]))
-        remaining_s = (r["deadline_at"] - now).total_seconds()
+    project_ch = guild.get_channel(int(r["project_channel_id"]))
+    remaining_s = (r["deadline_at"] - now).total_seconds()
 
-        # ── EXPIRED ──────────────────────────────────────────────────────
-if remaining_s <= 0:
-    if project_ch:
-        notice = (
-            f"⚠️ **DEADLINE HABIS!**\n"
-            f"<@{r['assignee_id']}> tidak menyelesaikan "
-            f"**{r['role']} #{r['chapter']}** tepat waktu.\n"
-            f"📁 Project: <#{r['project_channel_id']}>\n"
-            f"Chapter akan dilelang ulang."
-        )
-
-        if ADMIN_ROLE_ID:
-            notice += (
-                f"\n🔔 <@&{ADMIN_ROLE_ID}> perlu reauction "
-                f"**{r['role']} #{r['chapter']}**"
+    # ── EXPIRED ──────────────────────────────────────────────────────
+    if remaining_s <= 0:
+        if project_ch:
+            notice = (
+                f"⚠️ **DEADLINE HABIS!**\n"
+                f"<@{r['assignee_id']}> tidak menyelesaikan "
+                f"**{r['role']} #{r['chapter']}** tepat waktu.\n"
+                f"📁 Project: <#{r['project_channel_id']}>\n"
+                f"Chapter akan dilelang ulang."
             )
 
-        await project_ch.send(notice)
+            if ADMIN_ROLE_ID:
+                notice += (
+                    f"\n🔔 <@&{ADMIN_ROLE_ID}> perlu reauction "
+                    f"**{r['role']} #{r['chapter']}**"
+                )
 
-    async with bot.pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE chapter_assignments
-            SET status='available', assignee_id=NULL, assignee_name=NULL,
-                claimed_at=NULL, deadline_at=NULL, reminder_stage=0
-            WHERE id=$1
-        """, r["id"])
+            await project_ch.send(notice)
 
-    await refresh_auction_message(bot, r["auction_id"])
-    continue
+        async with bot.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE chapter_assignments
+                SET status='available', assignee_id=NULL, assignee_name=NULL,
+                    claimed_at=NULL, deadline_at=NULL, reminder_stage=0
+                WHERE id=$1
+            """, r["id"])
 
-        # ── TIERED REMINDERS ─────────────────────────────────────────────
-        remaining_h = remaining_s / 3600
+        await refresh_auction_message(bot, r["auction_id"])
+        continue
+
+    # ── TIERED REMINDERS ─────────────────────────────────────────────
+    remaining_h = remaining_s / 3600
         # Find the most urgent applicable stage not yet sent
         best_stage = 0
         best_label = ""
