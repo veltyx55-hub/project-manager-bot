@@ -664,7 +664,7 @@ async def deadline_check():
         remaining_s = (r["deadline_at"] - now).total_seconds()
 
         # ── EXPIRED ──────────────────────────────────────────────────────
-        if remaining_s <= 0:
+if remaining_s <= 0:
     if project_ch:
         notice = (
             f"⚠️ **DEADLINE HABIS!**\n"
@@ -682,16 +682,16 @@ async def deadline_check():
 
         await project_ch.send(notice)
 
-            async with bot.pool.acquire() as conn:
-                await conn.execute("""
-                    UPDATE chapter_assignments
-                    SET status='available', assignee_id=NULL, assignee_name=NULL,
-                        claimed_at=NULL, deadline_at=NULL, reminder_stage=0
-                    WHERE id=$1
-                """, r["id"])
+    async with bot.pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE chapter_assignments
+            SET status='available', assignee_id=NULL, assignee_name=NULL,
+                claimed_at=NULL, deadline_at=NULL, reminder_stage=0
+            WHERE id=$1
+        """, r["id"])
 
-            await refresh_auction_message(bot, r["auction_id"])
-            continue
+    await refresh_auction_message(bot, r["auction_id"])
+    continue
 
         # ── TIERED REMINDERS ─────────────────────────────────────────────
         remaining_h = remaining_s / 3600
