@@ -656,7 +656,6 @@ async def deadline_check():
         """)
 
     for r in rows:
-    for r in rows:
     guild = bot.get_guild(int(r["guild_id"]))
     if not guild:
         continue
