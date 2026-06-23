@@ -695,28 +695,33 @@ async def deadline_check():
 
     # ── TIERED REMINDERS ─────────────────────────────────────────────
     remaining_h = remaining_s / 3600
-        # Find the most urgent applicable stage not yet sent
-        best_stage = 0
-        best_label = ""
-        for hours, stage_num, label in REMINDER_STAGES:
-            if remaining_h <= hours and stage_num > best_stage:
-                best_stage = stage_num
-                best_label = label
 
-        if best_stage > r["reminder_stage"] and project_ch:
-            ts = int(r["deadline_at"].timestamp())
-            await project_ch.send(
-                f"⏰ **Reminder Deadline**\n"
-                f"<@{r['assignee_id']}> | **{r['role']} #{r['chapter']}**\n"
-                f"📁 Project: <#{r['project_channel_id']}>\n"
-                f"{best_label}\n"
-                f"Deadline: <t:{ts}:F> (<t:{ts}:R>)"
+    # Find the most urgent applicable stage not yet sent
+    best_stage = 0
+    best_label = ""
+
+    for hours, stage_num, label in REMINDER_STAGES:
+        if remaining_h <= hours and stage_num > best_stage:
+            best_stage = stage_num
+            best_label = label
+
+    if best_stage > r["reminder_stage"] and project_ch:
+        ts = int(r["deadline_at"].timestamp())
+
+        await project_ch.send(
+            f"⏰ **Reminder Deadline**\n"
+            f"<@{r['assignee_id']}> | **{r['role']} #{r['chapter']}**\n"
+            f"📁 Project: <#{r['project_channel_id']}>\n"
+            f"{best_label}\n"
+            f"Deadline: <t:{ts}:F> (<t:{ts}:R>)"
+        )
+
+        async with bot.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE chapter_assignments SET reminder_stage=$1 WHERE id=$2",
+                best_stage,
+                r["id"]
             )
-            async with bot.pool.acquire() as conn:
-                await conn.execute(
-                    "UPDATE chapter_assignments SET reminder_stage=$1 WHERE id=$2",
-                    best_stage, r["id"]
-                )
 
 
 # ================= /unclaim =================
