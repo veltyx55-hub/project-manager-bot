@@ -665,17 +665,22 @@ async def deadline_check():
 
         # ── EXPIRED ──────────────────────────────────────────────────────
         if remaining_s <= 0:
-            if project_ch:
-                notice = (
-                    f"⚠️ **DEADLINE HABIS!**\n"
-                    f"<@{r['assignee_id']}> tidak menyelesaikan "
-                    f"**{r['role']} #{r['chapter']}** tepat waktu.\n"
-                    f"📁 Project: <#{r['project_channel_id']}>\n"
-                    f"Chapter akan dilelang ulang."
-                )
-                if OWNER_ID:
-                    notice += f"\n🔔 <@{OWNER_ID}> perlu reauction **{r['role']} #{r['chapter']}**"
-                await project_ch.send(notice)
+    if project_ch:
+        notice = (
+            f"⚠️ **DEADLINE HABIS!**\n"
+            f"<@{r['assignee_id']}> tidak menyelesaikan "
+            f"**{r['role']} #{r['chapter']}** tepat waktu.\n"
+            f"📁 Project: <#{r['project_channel_id']}>\n"
+            f"Chapter akan dilelang ulang."
+        )
+
+        if ADMIN_ROLE_ID:
+            notice += (
+                f"\n🔔 <@&{ADMIN_ROLE_ID}> perlu reauction "
+                f"**{r['role']} #{r['chapter']}**"
+            )
+
+        await project_ch.send(notice)
 
             async with bot.pool.acquire() as conn:
                 await conn.execute("""
