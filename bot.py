@@ -656,72 +656,62 @@ async def deadline_check():
         """)
 
     for r in rows:
-    guild = bot.get_guild(int(r["guild_id"]))
-    if not guild:
-        continue
+        guild = bot.get_guild(int(r["guild_id"]))
+        if not guild:
+            continue
 
-    project_ch = guild.get_channel(int(r["project_channel_id"]))
-    remaining_s = (r["deadline_at"] - now).total_seconds()
+        project_ch  = guild.get_channel(int(r["project_channel_id"]))
+        remaining_s = (r["deadline_at"] - now).total_seconds()
 
-    # ── EXPIRED ──────────────────────────────────────────────────────
-    if remaining_s <= 0:
-        if project_ch:
-            notice = (
-                f"⚠️ **DEADLINE HABIS!**\n"
-                f"<@{r['assignee_id']}> tidak menyelesaikan "
-                f"**{r['role']} #{r['chapter']}** tepat waktu.\n"
-                f"📁 Project: <#{r['project_channel_id']}>\n"
-                f"Chapter akan dilelang ulang."
-            )
-
-            if ADMIN_ROLE_ID:
-                notice += (
-                    f"\n🔔 <@&{ADMIN_ROLE_ID}> perlu reauction "
-                    f"**{r['role']} #{r['chapter']}**"
+        # ── EXPIRED ──────────────────────────────────────────────────────
+        if remaining_s <= 0:
+            if project_ch:
+                notice = (
+                    f"⚠️ **DEADLINE HABIS!**\n"
+                    f"<@{r['assignee_id']}> tidak menyelesaikan "
+                    f"**{r['role']} #{r['chapter']}** tepat waktu.\n"
+                    f"📁 Project: <#{r['project_channel_id']}>\n"
+                    f"Chapter akan dilelang ulang."
                 )
+                if OWNER_ID:
+                    notice += f"\n🔔 <@{OWNER_ID}> perlu reauction **{r['role']} #{r['chapter']}**"
+                await project_ch.send(notice)
 
-            await project_ch.send(notice)
+            async with bot.pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE chapter_assignments
+                    SET status='available', assignee_id=NULL, assignee_name=NULL,
+                        claimed_at=NULL, deadline_at=NULL, reminder_stage=0
+                    WHERE id=$1
+                """, r["id"])
 
-        async with bot.pool.acquire() as conn:
-            await conn.execute("""
-                UPDATE chapter_assignments
-                SET status='available', assignee_id=NULL, assignee_name=NULL,
-                    claimed_at=NULL, deadline_at=NULL, reminder_stage=0
-                WHERE id=$1
-            """, r["id"])
+            await refresh_auction_message(bot, r["auction_id"])
+            continue
 
-        await refresh_auction_message(bot, r["auction_id"])
-        continue
+        # ── TIERED REMINDERS ─────────────────────────────────────────────
+        remaining_h = remaining_s / 3600
+        # Find the most urgent applicable stage not yet sent
+        best_stage = 0
+        best_label = ""
+        for hours, stage_num, label in REMINDER_STAGES:
+            if remaining_h <= hours and stage_num > best_stage:
+                best_stage = stage_num
+                best_label = label
 
-    # ── TIERED REMINDERS ─────────────────────────────────────────────
-    remaining_h = remaining_s / 3600
-
-    # Find the most urgent applicable stage not yet sent
-    best_stage = 0
-    best_label = ""
-
-    for hours, stage_num, label in REMINDER_STAGES:
-        if remaining_h <= hours and stage_num > best_stage:
-            best_stage = stage_num
-            best_label = label
-
-    if best_stage > r["reminder_stage"] and project_ch:
-        ts = int(r["deadline_at"].timestamp())
-
-        await project_ch.send(
-            f"⏰ **Reminder Deadline**\n"
-            f"<@{r['assignee_id']}> | **{r['role']} #{r['chapter']}**\n"
-            f"📁 Project: <#{r['project_channel_id']}>\n"
-            f"{best_label}\n"
-            f"Deadline: <t:{ts}:F> (<t:{ts}:R>)"
-        )
-
-        async with bot.pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE chapter_assignments SET reminder_stage=$1 WHERE id=$2",
-                best_stage,
-                r["id"]
+        if best_stage > r["reminder_stage"] and project_ch:
+            ts = int(r["deadline_at"].timestamp())
+            await project_ch.send(
+                f"⏰ **Reminder Deadline**\n"
+                f"<@{r['assignee_id']}> | **{r['role']} #{r['chapter']}**\n"
+                f"📁 Project: <#{r['project_channel_id']}>\n"
+                f"{best_label}\n"
+                f"Deadline: <t:{ts}:F> (<t:{ts}:R>)"
             )
+            async with bot.pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE chapter_assignments SET reminder_stage=$1 WHERE id=$2",
+                    best_stage, r["id"]
+                )
 
 
 # ================= /unclaim =================
