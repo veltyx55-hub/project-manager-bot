@@ -36,6 +36,14 @@ URGENT_BONUS = {
 }
 
 DEADLINE_HOURS = {"normal": 48, "urgent": 3}
+
+# Per-role urgent deadlines (Fitur #4)
+URGENT_DEADLINES = {
+    "KTL": 2,
+    "ETL": 2,
+    "TS":  3,
+}
+
 MAX_ACTIVE     = 2
 TL_ROLES       = ["KTL", "ETL"]
 
@@ -121,6 +129,13 @@ async def init_db(pool: asyncpg.Pool):
         ALTER TABLE chapter_assignments
         ADD COLUMN IF NOT EXISTS reminder_stage INTEGER DEFAULT 0
         """)
+        # Safe migration: new columns for custom deadline & rate
+        await conn.execute("""
+        ALTER TABLE auctions ADD COLUMN IF NOT EXISTS custom_deadline INTEGER
+        """)
+        await conn.execute("""
+        ALTER TABLE auctions ADD COLUMN IF NOT EXISTS custom_rate INTEGER
+        """)
 
 
 # ================= HELPERS =================
@@ -142,6 +157,30 @@ def effective_rate(role: str, urgent: bool) -> int:
         return base
     bonus_key = "TS" if role == "TS" else "TL"
     return base + URGENT_BONUS[bonus_key]
+
+
+def parse_deadline(value: str) -> Optional[int]:
+    """Parse '2h' → 2 hours, '1d' → 24 hours. Returns hours int or None."""
+    v = value.strip().lower()
+    try:
+        if v.endswith("h"):
+            return int(v[:-1])
+        if v.endswith("d"):
+            return int(v[:-1]) * 24
+    except ValueError:
+        pass
+    return None
+
+
+def parse_rate(value: str) -> Optional[int]:
+    """Parse '5k' → 5000, '10k' → 10000, '15000' → 15000. Returns int or None."""
+    v = value.strip().lower()
+    try:
+        if v.endswith("k"):
+            return int(float(v[:-1]) * 1000)
+        return int(v)
+    except ValueError:
+        return None
 
 
 def user_has_role(member: discord.Member, role_name: str) -> bool:
@@ -194,8 +233,17 @@ async def build_embed(pool: asyncpg.Pool, auction_id: int) -> discord.Embed:
     if not auction:
         return discord.Embed(title="❌ Auction not found", color=discord.Color.red())
 
-    urgent       = auction["urgent"]
-    mode         = "🔴 URGENT" if urgent else "🟢 Normal"
+    custom_dl    = auction["custom_deadline"] if "custom_deadline" in auction.keys() else None
+    custom_rate  = auction["custom_rate"]     if "custom_rate"     in auction.keys() else None
+    # Auto-urgent: custom deadline 1–3h counts as urgent (Fitur #3)
+    auto_urgent  = custom_dl is not None and 1 <= custom_dl <= 3
+    urgent       = auction["urgent"] or auto_urgent
+    if auto_urgent and not auction["urgent"]:
+        mode = "🔥 URGENT (custom)"
+    elif urgent:
+        mode = "🔴 URGENT"
+    else:
+        mode = "🟢 Normal"
     project_name = auction["project_name"] or "unknown"
     proj_ch_id   = auction["project_channel_id"]
     ch_mention   = f"<#{proj_ch_id}>" if proj_ch_id else ""
@@ -207,16 +255,25 @@ async def build_embed(pool: asyncpg.Pool, auction_id: int) -> discord.Embed:
     )
     embed.add_field(name="Mode", value=mode, inline=True)
 
-    # Payrates field
+    # Payrates field — use custom_rate if set, else effective_rate as before
     roles_present = [r for r in ["KTL", "ETL", "TS"] if any(x["role"] == r for x in rows)]
     if roles_present:
-        rate_lines = "\n".join(
-            f"**{r}**: {effective_rate(r, urgent) // 1000}k" for r in roles_present
-        )
+        if custom_rate is not None:
+            rate_lines = "\n".join(f"**{r}**: {custom_rate // 1000}k" for r in roles_present)
+        else:
+            rate_lines = "\n".join(
+                f"**{r}**: {effective_rate(r, urgent) // 1000}k" for r in roles_present
+            )
         embed.add_field(name="💰 Bayaran", value=rate_lines, inline=True)
 
-    deadline_h = DEADLINE_HOURS["urgent"] if urgent else DEADLINE_HOURS["normal"]
-    embed.add_field(name="⏰ Deadline", value=f"{deadline_h} jam", inline=True)
+    # Deadline display — custom_deadline takes priority
+    if custom_dl is not None:
+        dl_display = f"{custom_dl} jam (custom)"
+    elif urgent:
+        dl_display = f"{DEADLINE_HOURS['urgent']} jam"
+    else:
+        dl_display = f"{DEADLINE_HOURS['normal']} jam"
+    embed.add_field(name="⏰ Deadline", value=dl_display, inline=True)
 
     for role in ["KTL", "ETL", "TS"]:
         rrows = [r for r in rows if r["role"] == role]
@@ -336,9 +393,17 @@ class ClaimButton(discord.ui.Button):
                 f"❌ Tidak ada chapter **{self.role}** yang tersedia.", ephemeral=True
             )
 
-        deadline = datetime.now(timezone.utc) + timedelta(
-            hours=DEADLINE_HOURS["urgent"] if auction["urgent"] else DEADLINE_HOURS["normal"]
-        )
+        # Deadline priority: custom_deadline > urgent per-role > normal (Fitur #4)
+        custom_dl   = auction["custom_deadline"] if "custom_deadline" in auction.keys() else None
+        auto_urgent = custom_dl is not None and 1 <= custom_dl <= 3
+        effective_urgent = auction["urgent"] or auto_urgent
+        if custom_dl is not None:
+            deadline_hours = custom_dl
+        elif effective_urgent:
+            deadline_hours = URGENT_DEADLINES.get(self.role, DEADLINE_HOURS["urgent"])
+        else:
+            deadline_hours = DEADLINE_HOURS["normal"]
+        deadline = datetime.now(timezone.utc) + timedelta(hours=deadline_hours)
 
         async with pool.acquire() as conn:
             await conn.execute("""
@@ -369,13 +434,25 @@ class AuctionView(discord.ui.View):
             self.add_item(ClaimButton(r))
 
 
+# ================= /sync (owner only) =================
+@bot.tree.command(name="sync", description="Force re-sync slash commands (owner only)")
+async def sync_cmd(interaction: discord.Interaction):
+    if not OWNER_ID or interaction.user.id != OWNER_ID:
+        return await interaction.response.send_message("❌ Hanya owner yang bisa menjalankan ini.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    synced = await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
+    await interaction.followup.send(f"✅ Berhasil sync {len(synced)} command.", ephemeral=True)
+
+
 # ================= /auction =================
 @bot.tree.command(name="auction", description="Buat lelang chapter baru (jalankan di channel project)")
 @app_commands.describe(
     ktl="Chapter KTL, pisah koma (contoh: 50,51)",
     etl="Chapter ETL, pisah koma (contoh: 50,51)",
     ts="Chapter TS, pisah koma (contoh: 50,51)",
-    urgent="Mode urgent: deadline 3 jam + bonus bayaran"
+    urgent="Mode urgent: deadline pendek + bonus bayaran",
+    deadline="Custom deadline, contoh: 2h / 1d (opsional)",
+    rate="Custom bayaran semua role, contoh: 5k / 8000 (opsional)",
 )
 async def auction_cmd(
     interaction: discord.Interaction,
@@ -383,6 +460,8 @@ async def auction_cmd(
     etl: Optional[str] = None,
     ts:  Optional[str] = None,
     urgent: bool = False,
+    deadline: Optional[str] = None,
+    rate: Optional[str] = None,
 ):
     if not await home_guild_check(interaction):
         return
@@ -397,6 +476,27 @@ async def auction_cmd(
         return await interaction.response.send_message(
             "❌ Masukkan minimal 1 chapter (ktl/etl/ts).", ephemeral=True
         )
+
+    # Parse new optional params
+    custom_dl_h: Optional[int] = None
+    if deadline:
+        custom_dl_h = parse_deadline(deadline)
+        if custom_dl_h is None:
+            return await interaction.response.send_message(
+                "❌ Format deadline tidak valid. Gunakan contoh: `2h`, `1d`", ephemeral=True
+            )
+
+    custom_rate_val: Optional[int] = None
+    if rate:
+        custom_rate_val = parse_rate(rate)
+        if custom_rate_val is None:
+            return await interaction.response.send_message(
+                "❌ Format rate tidak valid. Gunakan contoh: `5k`, `8000`", ephemeral=True
+            )
+
+    # Auto-urgent if custom deadline 1–3h (Fitur #3)
+    auto_urgent = custom_dl_h is not None and 1 <= custom_dl_h <= 3
+    effective_urgent = urgent or auto_urgent
 
     # Route to correct auction channel (ID first, then name fallback)
     is_ts_only = bool(chapters["TS"]) and not chapters["KTL"] and not chapters["ETL"]
@@ -415,10 +515,11 @@ async def auction_cmd(
 
     async with bot.pool.acquire() as conn:
         auction_id = await conn.fetchval("""
-            INSERT INTO auctions (guild_id, project_channel_id, project_name, urgent)
-            VALUES ($1, $2, $3, $4) RETURNING id
+            INSERT INTO auctions (guild_id, project_channel_id, project_name, urgent,
+                                  custom_deadline, custom_rate)
+            VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
         """, str(interaction.guild_id), str(interaction.channel_id),
-            interaction.channel.name, urgent)
+            interaction.channel.name, effective_urgent, custom_dl_h, custom_rate_val)
 
         rows_to_insert = [
             (auction_id, ch, role)
@@ -649,7 +750,8 @@ async def deadline_check():
         rows = await conn.fetch("""
             SELECT ca.id, ca.assignee_id, ca.role, ca.chapter,
                    ca.deadline_at, ca.reminder_stage,
-                   a.project_channel_id, a.guild_id, a.id AS auction_id
+                   a.project_channel_id, a.guild_id, a.id AS auction_id,
+                   a.custom_deadline
             FROM chapter_assignments ca
             JOIN auctions a ON a.id = ca.auction_id
             WHERE ca.status='claimed' AND ca.deadline_at IS NOT NULL
@@ -673,8 +775,9 @@ async def deadline_check():
                     f"📁 Project: <#{r['project_channel_id']}>\n"
                     f"Chapter akan dilelang ulang."
                 )
-                if OWNER_ID:
-                    notice += f"\n🔔 <@{OWNER_ID}> perlu reauction **{r['role']} #{r['chapter']}**"
+                # Fitur #6: ping admin role, not OWNER_ID
+                if ADMIN_ROLE_ID:
+                    notice += f"\n🔔 <@&{ADMIN_ROLE_ID}> perlu reauction **{r['role']} #{r['chapter']}**"
                 await project_ch.send(notice)
 
             async with bot.pool.acquire() as conn:
@@ -690,28 +793,66 @@ async def deadline_check():
 
         # ── TIERED REMINDERS ─────────────────────────────────────────────
         remaining_h = remaining_s / 3600
-        # Find the most urgent applicable stage not yet sent
-        best_stage = 0
-        best_label = ""
-        for hours, stage_num, label in REMINDER_STAGES:
-            if remaining_h <= hours and stage_num > best_stage:
-                best_stage = stage_num
-                best_label = label
+        custom_dl   = r["custom_deadline"]  # hours int or None
+        is_short    = custom_dl is not None and 1 <= custom_dl <= 3
 
-        if best_stage > r["reminder_stage"] and project_ch:
-            ts = int(r["deadline_at"].timestamp())
-            await project_ch.send(
-                f"⏰ **Reminder Deadline**\n"
-                f"<@{r['assignee_id']}> | **{r['role']} #{r['chapter']}**\n"
-                f"📁 Project: <#{r['project_channel_id']}>\n"
-                f"{best_label}\n"
-                f"Deadline: <t:{ts}:F> (<t:{ts}:R>)"
-            )
-            async with bot.pool.acquire() as conn:
-                await conn.execute(
-                    "UPDATE chapter_assignments SET reminder_stage=$1 WHERE id=$2",
-                    best_stage, r["id"]
+        if is_short:
+            # Fitur #5: urgent-only reminders, stages 91/92 (never conflict with normal 1-5)
+            # Deadline 3h → remind at ≤2h (stage 91) and ≤1h (stage 92)
+            # Deadline 2h or 1h → remind at ≤1h (stage 91)
+            urgent_stages = []
+            if custom_dl >= 3:
+                urgent_stages = [
+                    (2, 91, "⏰ Sisa **2 jam** lagi!"),
+                    (1, 92, "🔴 Sisa **1 jam** lagi!"),
+                ]
+            else:
+                urgent_stages = [(1, 91, "🔴 Sisa **1 jam** lagi!")]
+
+            best_stage = 0
+            best_label = ""
+            for hours, stage_num, label in urgent_stages:
+                if remaining_h <= hours and stage_num > r["reminder_stage"] and stage_num > best_stage:
+                    best_stage = stage_num
+                    best_label = label
+
+            if best_stage > 0 and project_ch:
+                ts = int(r["deadline_at"].timestamp())
+                await project_ch.send(
+                    f"⏰ **Reminder Deadline (Urgent)**\n"
+                    f"<@{r['assignee_id']}> | **{r['role']} #{r['chapter']}**\n"
+                    f"📁 Project: <#{r['project_channel_id']}>\n"
+                    f"{best_label}\n"
+                    f"Deadline: <t:{ts}:F> (<t:{ts}:R>)"
                 )
+                async with bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE chapter_assignments SET reminder_stage=$1 WHERE id=$2",
+                        best_stage, r["id"]
+                    )
+        else:
+            # Normal tiered reminders (unchanged)
+            best_stage = 0
+            best_label = ""
+            for hours, stage_num, label in REMINDER_STAGES:
+                if remaining_h <= hours and stage_num > best_stage:
+                    best_stage = stage_num
+                    best_label = label
+
+            if best_stage > r["reminder_stage"] and project_ch:
+                ts = int(r["deadline_at"].timestamp())
+                await project_ch.send(
+                    f"⏰ **Reminder Deadline**\n"
+                    f"<@{r['assignee_id']}> | **{r['role']} #{r['chapter']}**\n"
+                    f"📁 Project: <#{r['project_channel_id']}>\n"
+                    f"{best_label}\n"
+                    f"Deadline: <t:{ts}:F> (<t:{ts}:R>)"
+                )
+                async with bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE chapter_assignments SET reminder_stage=$1 WHERE id=$2",
+                        best_stage, r["id"]
+                    )
 
 
 # ================= /unclaim =================
