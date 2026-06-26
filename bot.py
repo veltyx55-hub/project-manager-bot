@@ -1,3 +1,4 @@
+print("=== BOT.PY LOADED ===")
 import os
 import asyncpg
 import discord
@@ -80,10 +81,24 @@ class ScanBot(discord.Client):
         self.pool: Optional[asyncpg.Pool] = None
 
     async def setup_hook(self):
+        print("=== SETUP_HOOK CALLED ===")
         self.pool = await asyncpg.create_pool(DATABASE_URL)
         await init_db(self.pool)
         self.add_view(AuctionView(self))
-        await self.tree.sync(guild=discord.Object(id=GUILD_ID))
+        guild = discord.Object(id=GUILD_ID)
+        # Debug: print auction params BEFORE sync
+        auction_cmd_obj = self.tree.get_command("auction")
+        if auction_cmd_obj:
+            print(f"DEBUG auction params: {[p.name for p in auction_cmd_obj.parameters]}")
+        else:
+            print("DEBUG: auction command NOT found in tree")
+        # Clear old guild commands so stale definitions don't persist
+        self.tree.clear_commands(guild=guild)
+        self.tree.copy_global_to(guild=guild)
+        synced = await self.tree.sync(guild=guild)
+        print(f"✅ Synced {len(synced)} commands to guild {GUILD_ID}")
+        for cmd in synced:
+            print(f"  COMMAND: {cmd.name}")
         print("✅ Bot ready")
         deadline_check.start()
 
