@@ -92,13 +92,23 @@ class ScanBot(discord.Client):
             print(f"DEBUG auction params: {[p.name for p in auction_cmd_obj.parameters]}")
         else:
             print("DEBUG: auction command NOT found in tree")
-        # Clear old guild commands so stale definitions don't persist
+        # Step 1: guild sync dulu (local global tree masih utuh)
         self.tree.clear_commands(guild=guild)
         self.tree.copy_global_to(guild=guild)
         synced = await self.tree.sync(guild=guild)
         print(f"✅ Synced {len(synced)} commands to guild {GUILD_ID}")
         for cmd in synced:
             print(f"  COMMAND: {cmd.name}")
+            if cmd.name == "auction":
+                print(f"  DISCORD RETURNED auction options: {[o.name for o in cmd.options]}")
+
+        # Step 2: hapus global commands dari Discord via HTTP API
+        # (tanpa menyentuh local tree, supaya restart berikut masih bisa copy_global_to)
+        try:
+            await self.http.bulk_upsert_global_commands(self.application_id, [])
+            print("DEBUG: stale global commands wiped from Discord via HTTP API")
+        except Exception as e:
+            print(f"DEBUG: global wipe skipped ({e})")
         print("✅ Bot ready")
         deadline_check.start()
 
